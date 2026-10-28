@@ -1,10 +1,8 @@
-<img width="960" height="1962" alt="7ca56d978ad638747a0c1be76e0587a2" src="https://github.com/user-attachments/assets/e012b3b9-2f0d-4cbd-8067-a045241c1fca" /># WeChatGroupAI
-
 Windows 微信群 AI 助手、总结聊天。带图形管理界面，适合小范围群聊使用。
 
 ## 微信风控
 
-极严，玩了一周就消耗一个小号，不玩了
+极严，玩了一周就消耗一个小号
 
 <img width="1279" height="1422" alt="6ea2bbad22cc36aae00fecc999ea5663" src="https://github.com/user-attachments/assets/d677730e-458f-48a4-9414-1d8ca094807c" />
 
