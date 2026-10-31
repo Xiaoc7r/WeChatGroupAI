@@ -48,20 +48,21 @@ class Plan:
 def daily_status(store, account, room, config, now):
     if not config.get('daily_enabled'):
         return '每日早安：已关闭'
+    daily_time=config.get('daily_time','09:00')
     current=datetime.fromtimestamp(now,BEIJING)
     key='daily:'+current.date().isoformat()
     state=store.request_state(account,room,key)
     label={'claimed':'已排队/处理中','sent':'已发送','preview':'已预览，未发送','failed':'失败，请先检查群记录',
            'cancelled':'已停止取消，当天不自动重发'}.get(state,state)
     if label:
-        return f'今日早安：{label}；下次明天 {config["daily_time"]}（北京时间）'
-    hour,minute=map(int,config.get('daily_time','09:00').split(':'))
+        return f'今日早安：{label}；下次明天 {daily_time}（北京时间）'
+    hour,minute=map(int,daily_time.split(':'))
     due=current.replace(hour=hour,minute=minute,second=0,microsecond=0)
     if current<due:
-        return f'今日早安：等待 {config["daily_time"]}（北京时间）'
+        return f'今日早安：等待 {daily_time}（北京时间）'
     if (current-due).total_seconds()<300:
         return '今日早安：等待排队（5分钟补发窗口内）'
-    return f'今日早安：已错过，不补发；下次明天 {config["daily_time"]}（北京时间）'
+    return f'今日早安：已错过，不补发；下次明天 {daily_time}（北京时间）'
 
 def day_start(now):
     return datetime.fromtimestamp(now, BEIJING).replace(hour=0, minute=0, second=0, microsecond=0)
