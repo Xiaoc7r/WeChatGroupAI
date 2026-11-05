@@ -10,6 +10,12 @@ Windows 微信群 AI 助手，当前版本 **v4.1**，最多同时服务 **3 个
 
 命令：`/help`、`/all`、`/today`、`/status`、`/member @昵称`、`/morning`；`/eat` 暂时回复“尚未统计”。当前微信号可用 `/ai 问题` 测试。
 
+## 微信风控
+
+极严，玩了一周就消耗一个小号
+
+<img width="1279" height="1422" alt="6ea2bbad22cc36aae00fecc999ea5663" src="https://github.com/user-attachments/assets/d677730e-458f-48a4-9414-1d8ca094807c" />
+
 ## 使用
 
 1. 准备 Windows x64、Python 3.12 x64（含 Python Launcher、Tkinter）和官方微信客户端。

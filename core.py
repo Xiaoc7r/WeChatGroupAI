@@ -168,6 +168,6 @@ def ask(config, prompt, messages):
         raise RuntimeError(f'DeepSeek HTTP {response.status_code}；检查 Key、余额和模型名称')
     data = response.json()
     content = data['choices'][0]['message'].get('content')
-    if not content:
+    if not isinstance(content, str) or not content.strip():
         raise RuntimeError('模型未返回正文，请更换模型或稍后重试')
     return PREFIX + content.strip()[:3000], len(lines)
