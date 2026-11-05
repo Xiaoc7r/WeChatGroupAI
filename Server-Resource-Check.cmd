@@ -1,0 +1,3 @@
+@echo off
+powershell.exe -NoProfile -Command "$os=Get-CimInstance Win32_OperatingSystem; Write-Host 'Server memory (MiB):'; [pscustomobject]@{Total=[math]::Round($os.TotalVisibleMemorySize/1024);Free=[math]::Round($os.FreePhysicalMemory/1024)} | Format-List; Write-Host 'CPU load percentage (current CIM sample):'; Get-CimInstance Win32_Processor | Select-Object LoadPercentage; Write-Host 'WeChat and Python working sets (MiB), not total system usage:'; Get-Process -Name Weixin,WeChat,python,pythonw -ErrorAction SilentlyContinue | Select-Object ProcessName,Id,@{Name='WorkingSetMiB';Expression={[math]::Round($_.WorkingSet64/1MB,1)}} | Format-Table; Write-Host 'Read-only snapshot. Does not test WeChat connectivity or send messages.'"
+pause

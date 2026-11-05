@@ -6,6 +6,8 @@ from core import PREFIX, BEIJING
 
 def problem_hint(error):
     text=str(error).lower()
+    if any(word in text for word in ('登录','验证','会话','暂停')):
+        return '在官方微信中手动完成登录或验证，确认能正常收发，再重新启动助手；不会自动登录或重试发送。'
     if 'win32ui' in text or 'dll load failed' in text:
         return '缺少Windows运行组件：关闭助手，运行配套DLL修复文件，再重新打开。不要改Key或群名。'
     if '401' in text:
@@ -138,7 +140,7 @@ def prepare(store, account, room, key, prompt, config, now, members, requester=N
     numbers = store.member_numbers(account,room,members) if command == '/member' else None
     plan = route(prompt, now, members, requester, numbers, config.get('daily_time','09:00'))
     if plan.reply == '/status':
-        return PREFIX+'助手 v3.5.1 · 当前群服务中\n模式：'+('只预览' if config.get('preview') else '自动回复')+'\n'+daily_status(store,account,room,config,now), '', []
+        return PREFIX+'助手 v4.1 · 当前群服务中\n模式：'+('只预览' if config.get('preview') else '自动回复')+'\n'+daily_status(store,account,room,config,now), '', []
     if plan.reply:
         return PREFIX+plan.reply, '', []
     end = min(x for x in (plan.until, until, now) if x is not None)

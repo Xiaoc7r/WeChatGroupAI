@@ -23,3 +23,8 @@ dist/
 *.spec
 .DS_Store
 Thumbs.db
+
+server/
+cleanup-manifest.json
+
+整理说明.md

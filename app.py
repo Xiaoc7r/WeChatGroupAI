@@ -13,16 +13,14 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import win32crypt
 from core import Store, normalize, trigger, ask, PREFIX, PollWindow
-from features import prepare, schedule_due, daily_status, problem_hint, MENU
+from features import problem_hint, MENU
+from engine import Engine, group_settings, make_gui, SendUnconfirmed, SessionPaused
 
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 DATA = ROOT / 'data'
 DATA.mkdir(exist_ok=True)
 CONFIG = DATA / 'config.json'
-
-class SendUnconfirmed(RuntimeError):
-    """UI send completed but the database acknowledgement is still missing."""
 
 def save_config(cfg):
     data = dict(cfg)
@@ -47,7 +45,8 @@ class App:
         self.ready = False
         self.closing = False
         self.active_group = None
-        root.title('微信群 AI v3.5.1')
+        self.active_groups = []
+        root.title('微信群 AI v4.1 · 最多 3 个群')
         root.geometry('920x820')
         root.minsize(700,600)
         root.option_add('*Font', ('Microsoft YaHei UI',10))
@@ -58,16 +57,28 @@ class App:
         dashboard=ttk.Frame(root,padding=(16,12))
         dashboard.pack(side='top',fill='x')
         ttk.Label(dashboard,text='微信群 AI 助手',font=('Microsoft YaHei UI',18,'bold')).pack(anchor='w')
-        self.status=tk.StringVar(value='未启动')
-        ttk.Label(dashboard,textvariable=self.status,wraplength=850).pack(anchor='w',pady=4)
+        self.status=tk.StringVar(value='异常暂停（需手动恢复）' if (DATA/'safety-pause.json').exists() else '未启动')
+        self.status_label=ttk.Label(dashboard,textvariable=self.status,wraplength=850,font=('Microsoft YaHei UI',13,'bold'))
+        self.status_label.pack(anchor='w',pady=4)
+        def color_status(*_):
+            text=self.status.get()
+            color='#23703b' if text.startswith('运行中') else '#a32b24' if text.startswith('异常') else '#1f5b99' if text.startswith('启动中') else '#995b00' if text.startswith('停止中') else '#555555'
+            self.status_label.configure(foreground=color)
+        self.status.trace_add('write',color_status)
+        color_status()
         self.guide=tk.StringVar(value='登录微信后，保存并启动。')
         ttk.Label(dashboard,textvariable=self.guide,wraplength=850,foreground='#1f5b99').pack(anchor='w')
         self.pending_tip=tk.StringVar(value='')
-        ttk.Label(dashboard,textvariable=self.pending_tip,wraplength=850,foreground='#9b5400').pack(anchor='w')
+        pending_label=ttk.Label(dashboard,textvariable=self.pending_tip,wraplength=850,foreground='#9b5400')
         self.notice=tk.StringVar(value='')
-        ttk.Label(dashboard,textvariable=self.notice,wraplength=850,foreground='#9b5400').pack(anchor='w')
+        notice_label=ttk.Label(dashboard,textvariable=self.notice,wraplength=850,foreground='#9b5400')
         controls=ttk.Frame(dashboard)
         controls.pack(fill='x',pady=6)
+        for value,label in ((self.pending_tip,pending_label),(self.notice,notice_label)):
+            def show_notice(*_,v=value,w=label):
+                if v.get():w.pack(anchor='w',before=controls)
+                else:w.pack_forget()
+            value.trace_add('write',show_notice)
         self.start_btn=ttk.Button(controls,text='保存并启动',command=self.start)
         self.start_btn.pack(side='left')
         ttk.Button(controls,text='停止机器人',command=self.halt).pack(side='left',padx=6)
@@ -98,18 +109,41 @@ class App:
         frame_id=canvas.create_window((0,0),window=frame,anchor='nw')
         frame.bind('<Configure>',lambda e:canvas.configure(scrollregion=canvas.bbox('all')))
         canvas.bind('<Configure>',lambda e:canvas.itemconfigure(frame_id,width=e.width))
-        ttk.Label(frame,text='启动、停止会向目标群发送通知（预览模式也发送）。',wraplength=700).pack(anchor='w',pady=(8,12))
+        ttk.Label(frame,text='运行状态见页面顶部；启动、停止均不发群通知。',wraplength=700).pack(anchor='w',pady=(8,12))
         form = ttk.Frame(frame)
         form.pack(fill='x')
         self.vars = {}
-        fields = [('api_key','DeepSeek API Key',''),('model','模型名称','deepseek-flash'),('group','目标群完整名称',''),('nickname','微信号在该群的昵称',''),('account','微信号目录（可选）',''),('style','回答风格（可修改）','简洁自然，像群友说话，先说重点，不写官话。')]
+        fields = [('api_key','DeepSeek API Key',''),('model','模型名称','deepseek-flash'),('account','微信号目录（可选）',''),('style','回答风格（可修改）','简洁自然，像群友说话，先说重点，不写官话。')]
         for i,(key,label,default) in enumerate(fields):
             ttk.Label(form,text=label).grid(row=i,column=0,sticky='w',pady=5)
             var = tk.StringVar(value=cfg.get(key,default))
             self.vars[key]=var
             ttk.Entry(form,textvariable=var,show='*' if key=='api_key' else '').grid(row=i,column=1,sticky='ew',padx=(12,0))
         form.columnconfigure(1,weight=1)
-        ttk.Button(form,text='多行编辑风格',command=self.edit_style).grid(row=5,column=2,padx=5)
+        ttk.Button(form,text='多行编辑风格',command=self.edit_style).grid(row=3,column=2,padx=5)
+        groups_frame=ttk.LabelFrame(frame,text='服务群（最多 3 个）',padding=8)
+        groups_frame.pack(fill='x',pady=8)
+        for column,text in enumerate(('启用','完整群名','本微信号在该群的昵称')):
+            ttk.Label(groups_frame,text=text).grid(row=0,column=column,sticky='w',padx=4)
+        saved_groups=cfg.get('groups') or [{'group':cfg.get('group',''),'nickname':cfg.get('nickname','')}]
+        self.group_vars=[]
+        for index in range(3):
+            old=saved_groups[index] if index<len(saved_groups) else {}
+            enabled=tk.BooleanVar(value=index<len(saved_groups))
+            group=tk.StringVar(value=old.get('group',''))
+            nickname=tk.StringVar(value=old.get('nickname',''))
+            name_entry=ttk.Entry(groups_frame,textvariable=group)
+            nick_entry=ttk.Entry(groups_frame,textvariable=nickname)
+            def toggle(e=enabled,widgets=(name_entry,nick_entry)):
+                for widget in widgets:widget.configure(state='normal' if e.get() else 'disabled')
+            ttk.Checkbutton(groups_frame,variable=enabled,command=toggle).grid(row=index+1,column=0,sticky='w')
+            name_entry.grid(row=index+1,column=1,sticky='ew',padx=4,pady=3)
+            nick_entry.grid(row=index+1,column=2,sticky='ew',padx=4,pady=3)
+            toggle()
+            self.group_vars.append({'enabled':enabled,'group':group,'nickname':nickname})
+        groups_frame.columnconfigure(1,weight=1);groups_frame.columnconfigure(2,weight=1)
+        self.vars['group']=self.group_vars[0]['group']
+        self.vars['nickname']=self.group_vars[0]['nickname']
         options=ttk.Frame(frame)
         options.pack(fill='x',pady=6)
         self.daily=tk.BooleanVar(value=cfg.get('daily_enabled',True))
@@ -148,6 +182,10 @@ class App:
         ttk.Button(buttons,text='打开数据目录',command=lambda:os.startfile(DATA)).pack(side='right')
         manual=ttk.LabelFrame(use_content,text='自己试一下 · 不用群友配合',padding=8)
         manual.pack(fill='x',pady=(10,0))
+        self.test_group=tk.StringVar(value=cfg.get('group',''))
+        ttk.Label(manual,text='测试目标群').pack(anchor='w')
+        self.group_selector=ttk.Combobox(manual,textvariable=self.test_group,state='readonly')
+        self.group_selector.pack(fill='x',pady=(0,6))
         self.test_prompt=tk.StringVar(value='总结最近的群聊：大家聊了什么，有什么结论？')
         ttk.Entry(manual,textvariable=self.test_prompt).pack(fill='x')
         shortcuts=ttk.Frame(manual)
@@ -169,7 +207,7 @@ class App:
         self.tabs.add(self.answer,text='AI 回答（生成后显示）')
         self.tabs.add(self.log,text='运行日志')
         ttk.Label(frame,text='仅目标群文本发送给 DeepSeek；Key 加密保存。',foreground='#666666').pack(anchor='w',pady=8)
-        for var in [*self.vars.values(),self.daily,self.daily_time,self.context_wait]:
+        for var in [*self.vars.values(),self.daily,self.daily_time,self.context_wait,*[v for row in self.group_vars for v in row.values()]]:
             var.trace_add('write',self.mark_dirty)
         self.root.after(150,self.drain)
         self.root.protocol('WM_DELETE_WINDOW',self.close)
@@ -184,14 +222,15 @@ class App:
 
     def update_guide(self):
         if self.ready and not self.stop.is_set():
-            self.guide.set(f'当前群：{self.active_group}。'+('回复仅预览。' if self.runtime_preview else '自动回复中；@微信号 /help 查看菜单。'))
+            self.guide.set(f'服务群：{"、".join(g["group"] for g in self.active_groups) or self.active_group}。'+('回复仅预览。' if self.runtime_preview else '自动回复中；@微信号 /help 查看菜单。'))
         elif self.stop.is_set():
-            self.guide.set('正在发送停止通知，请稍等。')
+            self.guide.set('正在停止处理；不会发送群通知。')
 
     def cfg(self):
         return {**{k:v.get().strip() for k,v in self.vars.items()},'preview':self.preview.get(),
                 'daily_enabled':self.daily.get(),'daily_time':self.daily_time.get().strip(),
-                'context_wait':self.context_wait.get().strip()}
+                'context_wait':self.context_wait.get().strip(),
+                'groups':[{k:row[k].get().strip() for k in ('group','nickname')} for row in self.group_vars if row['enabled'].get()]}
 
     def copy_answer(self):
         if self.last_answer:
@@ -232,7 +271,7 @@ class App:
             messagebox.showinfo('先启动','请先点击“保存并启动”，等待日志显示已连接，再测试。')
             return
         cfg=self.cfg()
-        if cfg['group']!=self.active_group:
+        if cfg['groups']!=self.active_groups:
             messagebox.showerror('群设置尚未生效','群名称已修改，请先停止并重新启动，避免发错群。')
             return
         prompt=self.test_prompt.get().strip()
@@ -241,8 +280,12 @@ class App:
         if self.commands.qsize()>=8:
             messagebox.showinfo('请稍等','已有多条请求排队，请等待回答。')
             return
-        self.commands.put((prompt,send,cfg['style']))
-        self.emit(f'已提交手动测试 → {self.active_group}（'+('将发送到群' if send else '仅预览')+'）')
+        target=self.test_group.get()
+        if target not in [g['group'] for g in self.active_groups]:
+            messagebox.showerror('选择群','请先选择一个已启动的目标群。')
+            return
+        self.commands.put((target,prompt,send,cfg['style']))
+        self.emit(f'已提交手动测试 → {target}（'+('将发送到群' if send else '仅预览')+'）')
 
     def emit(self,text):
         self.events.put(('log',text))
@@ -254,8 +297,8 @@ class App:
                 if kind=='done':
                     self.ready=False
                     self.start_btn.configure(state='normal')
-                    self.status.set('已停止')
-                    self.guide.set('已停止回复。')
+                    self.status.set(text or '已停止')
+                    self.guide.set('自动操作已暂停，请查看错误并手动处理。' if text.startswith('异常') else '已停止回复。')
                     self.schedule_status.set('每日任务：机器人已停止，暂停执行')
                     if self.closing:
                         self.root.destroy()
@@ -266,6 +309,7 @@ class App:
                 elif kind=='notice':
                     self.notice.set(text)
                 elif kind=='status':
+                    if self.stop.is_set():continue
                     self.status.set(text)
                     self.update_guide()
                 elif kind=='schedule':
@@ -293,10 +337,11 @@ class App:
         if self.thread and self.thread.is_alive():
             return
         cfg=self.cfg()
-        if not all(cfg[k] for k in ('api_key','model','group','nickname')):
+        if not all(cfg[k] for k in ('api_key','model')):
             messagebox.showerror('配置未完成','请填写 API Key、模型、目标群和微信号群昵称。')
             return
         try:
+            cfg['groups']=group_settings(cfg)
             import re
             if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',cfg['daily_time']):
                 raise ValueError('每日时间请填写 HH:MM，例如09:00。')
@@ -308,8 +353,12 @@ class App:
         except ValueError as e:
             messagebox.showerror('配置错误',str(e))
             return
+        if (DATA/'safety-pause.json').exists():
+            if not messagebox.askyesno('手动恢复','上次异常已暂停。请先在官方微信完成登录或安全验证，并确认可正常收发。\n已经处理好，恢复助手吗？'):
+                return
+            cfg['resume_confirmed']=True
         try:
-            save_config(cfg)
+            save_config({k:v for k,v in cfg.items() if k!='resume_confirmed'})
         except Exception:
             messagebox.showerror('保存失败','无法写入配置。请确认程序目录可写；本次没有启动。')
             return
@@ -317,23 +366,29 @@ class App:
         self.pending_tip.set('')
         self.notice.set('')
         self.ready=False
-        self.active_group=cfg['group']
+        self.active_groups=[dict(g) for g in cfg['groups']]
+        self.active_group=self.active_groups[0]['group']
+        self.group_selector.configure(values=[g['group'] for g in self.active_groups])
+        self.test_group.set(self.active_group)
         self.runtime_preview=cfg['preview']
         self.stop.clear()
         self.start_btn.configure(state='disabled')
-        self.status.set('正在连接微信；首次数据库初始化可能需要一两分钟…')
+        self.status.set('启动中 · 正在连接微信…')
         self.guide.set('正在连接，请不要重复启动。连接成功后，到“试用与回答”先测试菜单。')
         self.thread=threading.Thread(target=self.run,args=(cfg,),daemon=True)
         self.thread.start()
 
     def halt(self):
+        if not self.thread or not self.thread.is_alive():
+            if not self.status.get().startswith('异常'):self.status.set('已停止')
+            return
         self.stop.set()
-        self.status.set('正在停止；未开始发送的回答将丢弃…')
+        self.status.set('停止中 · 正在取消未发送的请求…')
         self.update_guide()
 
     def close(self):
         if self.thread and self.thread.is_alive():
-            if not messagebox.askyesno('退出助手','退出会停止群回复和每日总结，并发送停止通知。确定退出？'):
+            if not messagebox.askyesno('退出助手','退出会停止群回复和每日总结，不会发送群通知。确定退出？'):
                 return
             self.closing=True
             self.halt()
@@ -372,216 +427,60 @@ class App:
             raise RuntimeError('发送未确认，不自动重试：'+str(reason))
 
     def run(self,cfg):
-        store=None
-        executor=None
-        pending=[]
-        active=None
-        com_initialized=False
-        announced=False
+        store=None;executor=None;engine=None;initialized=False;normal=False;end_state='已停止'
         try:
             import pythoncom
-            pythoncom.CoInitialize()
-            com_initialized=True
+            pythoncom.CoInitialize();initialized=True
             from wechatauto.db import WeChatDB, auto_detect_db_dir, _find_account_dirs
-            from wechatauto.guia import WeChatGUI
             from wechatauto.param import WxParam
             WxParam.ENABLE_FILE_LOGGER=False
             directory=auto_detect_db_dir()
-            if not directory:
-                raise RuntimeError('找不到微信数据，请先登录微信号并打开目标群。')
+            if not directory:raise RuntimeError('找不到微信数据，请先手动登录微信。')
             accounts=[Path(x).name for x in _find_account_dirs(directory) if (Path(x)/'db_storage').is_dir()]
-            account=cfg['account']
+            account=cfg.get('account')
             if not account:
-                if len(accounts)!=1:
-                    raise RuntimeError('检测到多个/没有账号，请在“账号目录”填写微信号对应项：'+', '.join(accounts))
+                if len(accounts)!=1:raise RuntimeError('请选择微信号目录：'+', '.join(accounts))
                 account=accounts[0]
-            if account not in accounts:
-                raise RuntimeError('账号目录不匹配，可用项：'+', '.join(accounts))
+            if account not in accounts:raise RuntimeError('微信号目录不匹配。')
             cache=DATA/'wechat_cache'/account
             cache.mkdir(parents=True,exist_ok=True)
             class SelectedAccountDB(WeChatDB):
-                # Never silently migrate to another locally stored account.
-                def _try_other_accounts(self):
-                    return False
-                def _select_account_by_keys(self, candidates):
-                    return False
-                def _stable_key_dirs(self):
-                    return [str(DATA/'key_cache')]
+                def _try_other_accounts(self):return False
+                def _select_account_by_keys(self,candidates):return False
+                def _stable_key_dirs(self):return [str(DATA/'key_cache')]
+            gui=make_gui()
+            gui.check_session()
             db=SelectedAccountDB(db_dir=directory,account=account,workdir=str(cache))
-            if db.account!=account:
-                raise RuntimeError('接入库切换了账号，已停止。请仅登录目标微信号后重试。')
-            self_info=db.get_self_info()
-            own=self_info['username']
-            names=db.nickname_map()
-            rooms=[u for u,n in names.items() if u.endswith('@chatroom') and n==cfg['group']]
-            if len(rooms)!=1:
-                raise RuntimeError('目标群未唯一匹配，请核对完整群名、先在微信打开该群；同名群需改成不同名称。')
-            room=rooms[0]
-            members={own:self_info.get('nick_name') or cfg['nickname']}
-            try:
-                for member in db.get_group_members(room):
-                    names[member['username']]=member.get('nick_name') or member['username']
-                    members[member['username']]=names[member['username']]
-            except Exception:
-                pass
-            gui=WeChatGUI()
+            if db.account!=account:raise RuntimeError('接入库切换了账号，已停止。')
             gui._cached_db=db
             store=Store(DATA/'history.sqlite3')
-            initial=db.get_messages(room,limit=500)
-            initial_messages=[normalize(row,names) for row in reversed(initial)]
-            store.add_many(own,room,initial_messages)
-            poller=PollWindow(initial)
-            poller.last_full=time.time()
-            for m in initial_messages:
-                if m['sender']:
-                    members.setdefault(m['sender'],m['name'])
-            self.emit(f'已连接：{self_info.get("nick_name") or own}；群：{cfg["group"]}；载入 {len(initial)} 条本机历史。旧 @ 不补答。')
-            self.emit('注意：请确认当前客户端登录的就是该微信号。程序仅响应启动之后的新消息。')
-            self.emit('支持自己发 /ai 问题、自己 @ 自己，或点击“生成预览 / 生成并发送”。')
-            self.emit('@我 /help 查看菜单。')
-            self.emit('每日早安：'+(cfg['daily_time']+'（北京时间，上一完整日周期最多500条；错过5分钟不补发）' if cfg['daily_enabled'] else '已关闭'))
-            if self.stop.is_set():
-                return
-            try:
-                self.send_verified(db,gui,room,cfg['group'],PREFIX+'本次服务器已正式启动！')
-                self.emit('启动通知已发送。')
-            except SendUnconfirmed as e:
-                self.emit('启动通知：'+str(e))
-                self.events.put(('notice','启动通知未获数据库确认，助手继续运行；请查看群消息，不重复发送。'))
-            announced=True
-            self.ready=True
-            started=time.time()
-            last_reply=0
-            pending=[]
-            active=None
             executor=ThreadPoolExecutor(max_workers=1)
-            count=0
-            failures=0
-            last_prune=0
-            last_status=None
-            last_schedule=None
+            engine=Engine(self,cfg,db,gui,store,executor,DATA/'safety-pause.json')
+            engine.initialize()
             while not self.stop.is_set():
-                try:
-                    scanned,rows=poller.fetch(db,room,time.time())
-                    if poller.saturated:
-                        self.emit('本轮新增消息可能超过1500条补读窗口，更早记录可能未采集；不会宣称覆盖全部历史。')
-                    messages=[normalize(row,names) for row in reversed(rows)]
-                    cutoff=time.time()-7*86400
-                    messages=[m for m in messages if not m['ts'] or m['ts']>=cutoff]
-                    inserted=store.add_many(own,room,messages)
-                    poller.remember(scanned)
-                    for m in inserted:
-                        count+=1
-                        if m['sender']:
-                            members.setdefault(m['sender'],m['name'])
-                        if m['ts']<started or m['text'].startswith(PREFIX) or m['kind'] not in ('文本','text'):
-                            continue
-                        prompt=trigger(m['text'],cfg['nickname'],is_self=m['sender']==own)
-                        if prompt and store.claim(own,room,m['key']):
-                            busy_sender=m.get('sender') and (any(item[0].get('sender')==m['sender'] for item in pending) or
-                                                            (active and active[1].get('sender')==m['sender']))
-                            if busy_sender:
-                                store.state(own,room,m['key'],'sender_busy')
-                                self.emit('该成员已有请求排队或处理中，本次重复触发已跳过。')
-                            elif len(pending)>=8:
-                                store.state(own,room,m['key'],'queue_full')
-                                self.emit('请求过多，本条已跳过；稍后重新 @。')
-                            else:
-                                pending.append((m,prompt,None,cfg['style'],time.time()+cfg['context_wait'],m['ts']+cfg['context_wait']))
-                                self.emit('收到 @ 或 /ai，已排队。')
-                    while not self.commands.empty():
-                        prompt,send,style=self.commands.get_nowait()
-                        if len(pending)>=8:
-                            self.emit('队列已满，本次手动请求未执行，请稍后重试。')
-                            continue
-                        key='manual-'+uuid.uuid4().hex
-                        m={'key':key,'sender':own}
-                        store.claim(own,room,key)
-                        pending.append((m,prompt,send,style,time.time(),None))
-                    due=schedule_due(cfg,time.time())
-                    if due and len(pending)<8 and store.claim(own,room,due[0]):
-                        pending.append(({'key':due[0],'sender':own},'/morning',None,cfg['style'],time.time(),due[1]))
-                        self.emit('每日早安总结已排队（北京时间；同一天不重复）。')
-                    failures=0
-                    if active and active[0].done():
-                        future,m,send=active
-                        active=None
-                        text=None
-                        try:
-                            text,included=future.result()
-                            if self.stop.is_set():
-                                store.state(own,room,m['key'],'cancelled')
-                                break
-                            actual_send=send if send is not None else not self.runtime_preview
-                            self.emit('AI 已生成：'+text)
-                            self.events.put(('answer',f'群：{cfg["group"]} · 参考 {included} 条记录 · '+('准备发送' if actual_send else '仅预览，未发送')+'\n\n'+text))
-                            if not actual_send:
-                                self.emit('预览（未发送）：'+text)
-                                store.state(own,room,m['key'],'preview')
-                            else:
-                                self.send_verified(db,gui,room,cfg['group'],text)
-                                store.state(own,room,m['key'],'sent')
-                                self.emit(f'已回复；本次参考 {included} 条文本/类型记录。')
-                                self.events.put(('answer',f'已发送到：{cfg["group"]} · 参考 {included} 条记录\n\n'+text))
-                        except Exception as e:
-                            store.state(own,room,m['key'],'failed')
-                            self.emit('本次失败：'+str(e).replace(cfg['api_key'],'[Key]')[:350])
-                            self.events.put(('answer',problem_hint(e)+'\n\n具体错误：'+str(e).replace(cfg['api_key'],'[Key]')[:350]+'\n发送未确认时请先看微信，避免重复发送。'+('\n\n已生成的回答（可复制）：\n'+text if text else '')))
-                        last_reply=time.time()
-                    if not active and pending and time.time()-last_reply>=8 and time.time()>=pending[0][4]:
-                        m,prompt,send,style,ready_at,end=pending.pop(0)
-                        reference=end if m['key'].startswith('daily:') else time.time()
-                        direct,request,context=prepare(store,own,room,m['key'],prompt,{**cfg,'preview':self.runtime_preview},reference,members,m.get('sender'),end)
-                        self.emit(f'正在生成回答：读取 {len(context)} 条上下文…')
-                        if direct is not None:
-                            from concurrent.futures import Future
-                            future=Future()
-                            future.set_result((direct,len(context)))
-                        else:
-                            future=executor.submit(ask,{**cfg,'style':style},request,context)
-                        active=(future,m,send)
-                    if time.time()-last_prune>3600:
-                        store.prune()
-                        last_prune=time.time()
-                    status=f'运行中 · {cfg["group"]} · '+('只预览' if self.runtime_preview else '自动发群')+f' · 新消息 {count} · 排队 {len(pending)} · '+('AI 正在回答' if active else '等待 @、/ai 或手动测试')
-                    schedule=daily_status(store,own,room,cfg,time.time())
-                    if status!=last_status:
-                        self.events.put(('status',status))
-                        last_status=status
-                    if schedule!=last_schedule:
-                        self.events.put(('schedule',schedule))
-                        last_schedule=schedule
-                except Exception as e:
-                    failures+=1
-                    self.emit('采集异常：'+str(e).replace(cfg['api_key'],'[Key]')[:350])
-                    if failures>=3:
-                        raise RuntimeError('连续三次采集失败，已停止；检查微信登录后重新启动。')
+                engine.tick()
                 self.stop.wait(3)
+            normal=True
         except Exception as e:
-            self.emit('无法运行：'+str(e).replace(cfg['api_key'],'[Key]')[:600])
-            self.emit(problem_hint(e))
-            self.events.put(('answer','启动或运行中断：\n'+problem_hint(e)+'\n\n具体错误：'+str(e).replace(cfg['api_key'],'[Key]')[:600]))
+            end_state='异常暂停 · 请查看下方错误'
+            detail=str(e).replace(cfg['api_key'],'[Key]')[:500]
+            if isinstance(e,SessionPaused):
+                # A restart never silently clears the pause; start() requires explicit recovery.
+                pause=DATA/'safety-pause.json'
+                if not pause.exists():
+                    pause.write_text(json.dumps({'reason':'微信会话或发送异常，需要手动检查。','time':time.time()},ensure_ascii=False),encoding='utf-8')
+                self.events.put(('notice','已暂停自动操作；请完成微信登录或验证后手动重新启动。'))
+            self.emit('已停止：'+detail)
+            self.events.put(('answer',detail+'\n\n'+problem_hint(e)))
         finally:
             self.ready=False
-            if announced:
-                try:
-                    self.send_verified(db,gui,room,cfg['group'],PREFIX+'本次服务器已正式停止！')
-                    self.emit('停止通知已发送。')
-                except Exception as e:
-                    error='停止通知发送未确认：'+str(e).replace(cfg['api_key'],'[Key]')[:350]
-                    self.emit(error)
-                    self.events.put(('answer',error))
-            if store:
-                for item in pending:
-                    store.state(own,room,item[0]['key'],'cancelled')
-                if active:
-                    store.state(own,room,active[1]['key'],'cancelled')
-                store.db.close()
-            if executor:
-                executor.shutdown(wait=False,cancel_futures=True)
-            if com_initialized:
-                pythoncom.CoUninitialize()
-            self.events.put(('done',''))
+            try:
+                if engine:engine.close(normal=normal)
+            except Exception as e:self.emit('停止清理异常：'+str(e).replace(cfg['api_key'],'[Key]')[:200])
+            if store:store.db.close()
+            if executor:executor.shutdown(wait=False,cancel_futures=True)
+            if initialized:pythoncom.CoUninitialize()
+            self.events.put(('done',end_state))
 
 if __name__=='__main__':
     mutex=ctypes.windll.kernel32.CreateMutexW(None,False,'Local\\WeChatGroupAI_single_instance')
